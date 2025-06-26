@@ -206,3 +206,66 @@ void computeShBasis(
     }
 }
 ```
+
+
+### 7.硬编码球谐表
+
+| Band  |                 m=-2                 |                 m=-1                  |                       m=0                       |                  m=1                  |                     m=2                     |
+| :---: | :----------------------------------: | :-----------------------------------: | :---------------------------------------------: | :-----------------------------------: | :-----------------------------------------: |
+| $l=0$ |                                      |                                       |        $\frac{1}{2}\sqrt{\frac{1}{\pi}}$        |                                       |                                             |
+| $l=1$ |                                      |  $-\frac{1}{2}\sqrt{\frac{3}{\pi}}y$  |       $\frac{1}{2}\sqrt{\frac{3}{\pi}}z$        |  $-\frac{1}{2}\sqrt{\frac{3}{\pi}}x$  |                                             |
+| $l=2$ | $\frac{1}{2}\sqrt{\frac{15}{\pi}}xy$ | $-\frac{1}{2}\sqrt{\frac{15}{\pi}}yz$ | $\frac{1}{4}\sqrt{\frac{5}{\pi}}(2z^2-x^2-y^2)$ | $-\frac{1}{2}\sqrt{\frac{15}{\pi}}xz$ | $\frac{1}{4}\sqrt{\frac{15}{\pi}}(x^2-y^2)$ |
+
+
+```cpp
+// Hardcoded spherical harmonic functions for low orders (l is first number
+// and m is second number (sign encoded as preceeding 'p' or 'n')).
+//
+// As polynomials they are evaluated more efficiently in cartesian coordinates,
+// assuming that @d is unit. This is not verified for efficiency.
+double HardcodedSH00(const Eigen::Vector3d& d) {
+  // 0.5 * sqrt(1/pi)
+  return 0.282095;
+}
+
+double HardcodedSH1n1(const Eigen::Vector3d& d) {
+  // -sqrt(3/(4pi)) * y
+  return -0.488603 * d.y();
+}
+
+double HardcodedSH10(const Eigen::Vector3d& d) {
+  // sqrt(3/(4pi)) * z
+  return 0.488603 * d.z();
+}
+
+double HardcodedSH1p1(const Eigen::Vector3d& d) {
+  // -sqrt(3/(4pi)) * x
+  return -0.488603 * d.x();
+}
+
+double HardcodedSH2n2(const Eigen::Vector3d& d) {
+  // 0.5 * sqrt(15/pi) * x * y
+  return 1.092548 * d.x() * d.y();
+}
+
+double HardcodedSH2n1(const Eigen::Vector3d& d) {
+  // -0.5 * sqrt(15/pi) * y * z
+  return -1.092548 * d.y() * d.z();
+}
+
+double HardcodedSH20(const Eigen::Vector3d& d) {
+  // 0.25 * sqrt(5/pi) * (-x^2-y^2+2z^2)
+  return 0.315392 * (-d.x() * d.x() - d.y() * d.y() + 2.0 * d.z() * d.z());
+}
+
+double HardcodedSH2p1(const Eigen::Vector3d& d) {
+  // -0.5 * sqrt(15/pi) * x * z
+  return -1.092548 * d.x() * d.z();
+}
+
+double HardcodedSH2p2(const Eigen::Vector3d& d) {
+  // 0.25 * sqrt(15/pi) * (x^2 - y^2)
+  return 0.546274 * (d.x() * d.x() - d.y() * d.y());
+}
+
+```

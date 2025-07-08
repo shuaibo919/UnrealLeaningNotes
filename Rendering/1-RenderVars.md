@@ -13,8 +13,7 @@
 `FPrimitiveSceneProxy`是`UPrimitiveComponent`的在渲染线程中的数据。如果要自定义一些功能，那么就要创建`UPrimitiveComponent`和`FPrimitiveSceneProxy`的子类，并具体实现。这部分的具体内容可参考[博客园 向往0的 《剖析虚幻渲染体系（03）- 渲染机制》](https://www.cnblogs.com/timlly/p/14588598.html)
 
 #### 2.2.1 了解顶点渲染流程
-虚幻引擎中可以参考`BasePassVertexShader.usf`来了解顶点渲染流程。
-其入口函数如下:
+一个顶点工厂对存在一个一个对应的着色器标头文件（.ush）,标头文件中的FVertexFactoryInput 以及一些函数会被其他的虚幻着色器格式（.usf）或标头文件（.ush）所包含。例如BasePassVertexShader.usf具有如下的入口函数:
 ```hlsl
 /** Entry point for the base pass vertex shader. */
 void Main(
@@ -28,9 +27,9 @@ void Main(
 #endif
 	)
 ```
-其中宏处理部分，可以暂时不关心，那么就只要一个输入是`FVertexFactoryInput`，一个输出是`FBasePassVSOutput`。其中，后者是创建好的，可以不关心。
+其中宏处理部分，可以暂时不关心，那么就只要一个输入是`FVertexFactoryInput`，一个输出是`FBasePassVSOutput`。其中，后者是创建好的，可以不关心。`FVertexFactoryInput`结构体类型就要求我们必须在顶点工厂的对应的.ush文件中创建，否则Shader编译时就会报错，因为它找不到`FVertexFactoryInput`的定义。
 
-于是，如果我们自己自定义了顶点工厂，就需要创建对应的`.usf`文件，其中又必须实现`FVertexFactoryInput`,例如以下是来自`MeshParticleVertexFactory`的`.ush`中的`FVertexFactoryInput`
+于是，如果我们自己自定义了顶点工厂，就需要创建对应的`.ush`文件，其中又必须实现`FVertexFactoryInput`,例如以下是来自`MeshParticleVertexFactory`的`.ush`中的`FVertexFactoryInput`
 ```hlsl
 // Engine\Shaders\Private\MeshParticleVertexFactory.ush
 struct FVertexFactoryInput

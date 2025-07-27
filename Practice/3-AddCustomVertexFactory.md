@@ -7,6 +7,8 @@
   - 已解决：在蓝图Actor下添加MeshComponent触发Crush,疑似LOD在RenderProxy设置有问题？
 ![alt text](image-AddCustomVertexFactoryCrush.png)：RenderProxy没有正确被保存。
 
+![alt text](image-resultEditor.png)
+
 
 ### 1. Step1 添加对应ush着色器文件
 ```hlsl

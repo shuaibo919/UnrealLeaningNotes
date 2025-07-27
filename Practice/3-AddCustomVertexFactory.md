@@ -4,398 +4,438 @@
 
 - 问题记录
   - 已解决：添加自定义ush后引起的Shader编译Crush,添加SceneData和`#include "VertexFactoryDefaultInterface.ush"`
-  - 待解决：在蓝图Actor下添加MeshComponent触发Crush,疑似LOD在RenderProxy设置有问题？
-![alt text](image-AddCustomVertexFactoryCrush.png)
+  - 已解决：在蓝图Actor下添加MeshComponent触发Crush,疑似LOD在RenderProxy设置有问题？
+![alt text](image-AddCustomVertexFactoryCrush.png)：RenderProxy没有正确被保存。
 
 
 ### 1. Step1 添加对应ush着色器文件
 ```hlsl
 #include "/Engine/Private/VertexFactoryCommon.ush"
 
-// 1.定义FVertexFactoryInput，根据需要填充不同的数据
-struct FVertexFactoryInput
-{
-	float4	Position	: ATTRIBUTE0;
-	uint VertexId : SV_VertexID;
-	uint InstanceId	: SV_InstanceID;
+struct FVertexFactoryInput {
+	float4 Position : ATTRIBUTE0;
+	float3 TangentX : ATTRIBUTE1;
+	float4 TangentZ : ATTRIBUTE2;
 };
 
-// 2. VS到PS的数据
-struct FVertexFactoryInterpolantsVSToPS
-{
-	half4 Color	: COLOR0;
-	float2 TexCoords	: TEXCOORD0;
+struct FVertexFactoryIntermediates {
+	// Position in world space
+	float3 Position;
+	// Vertex color
+	half4 Color;
+	// Tangent matrix
+	half3x3 TangentToLocal;
+	half3x3 TangentToWorld;
+	half TangentToWorldSign;
 };
 
-// 3. Intermediates的临时数据填充
-struct FVertexFactoryIntermediates
-{
-	float3	Position;
-	half4	Color;
-
-	FSceneDataIntermediates SceneData;
+struct FVertexFactoryInterpolantsVSToPS {
+	float4 TangentToWorld0 : TEXCOORD1_centroid;
+	float4 TangentToWorld2 : TEXCOORD2_centroid;
 };
 
-// 4. 填充Intermediates
+FInstanceSceneData GetInstanceData()
+{
+	return GetSceneDataIntermediates().InstanceData; 
+}
+
+half3x3 CalcTangentToLocal(FVertexFactoryInput Input, out float TangentSign)
+{
+	half3x3 Result;
+	half3 TangentInputX = Input.TangentX;
+	half4 TangentInputZ = Input.TangentZ;
+	half3 TangentX = TangentBias(TangentInputX);
+	half4 TangentZ = TangentBias(TangentInputZ);
+	TangentSign = TangentZ.w;
+
+	half3 TangentY = cross(TangentZ.xyz, TangentX.xyz) * TangentZ.w;
+	Result[0] = cross(TangentY, TangentZ.xyz) * TangentSign;
+	Result[1] = TangentY;
+	Result[2] = TangentZ.xyz;
+	return Result;
+}
+
+half3x3 CalcTangentToWorldNoScale(half3x3 TangentToLocal)
+{
+	half3x3 LocalToWorld = (half3x3) DFToFloat3x3(GetInstanceData().LocalToWorld);
+	half3 InvScale = GetInstanceData().InvNonUniformScale;
+	LocalToWorld[0] *= InvScale.x;
+	LocalToWorld[1] *= InvScale.y;
+	LocalToWorld[2] *= InvScale.z;
+	return mul(TangentToLocal, LocalToWorld);
+}
+
 FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
 {
-	FVertexFactoryIntermediates Intermediates = (FVertexFactoryIntermediates)0;
-	Intermediates.SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
-	Intermediates.Position = Input.Position.xyz;
-	Intermediates.Color = half4(0,0,0,1);
-	
-	return Intermediates;
-}
-
-// 5. Converts from vertex factory specific interpolants to a FMaterialPixelParameters, which is used by material inputs.
-FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
-{
-	// GetMaterialPixelParameters is responsible for fully initializing the result
-	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
-#if NUM_MATERIAL_TEXCOORDS
-	UNROLL
-	for (int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS; CoordinateIndex++)
-	{
-		Result.TexCoords[CoordinateIndex] = Interpolants.TexCoords;
-	}
-#endif
-	
-	Result.VertexColor = Interpolants.Color;
-	Result.TwoSidedSign = 1;
-	
+	FVertexFactoryIntermediates Result;
+	Result.Color = half4(1,1,1,1);
+	Result.Position = Input.Position.xyz;
+	float TangentSign;
+	Result.TangentToLocal = CalcTangentToLocal(Input, TangentSign);
+	Result.TangentToWorld = CalcTangentToWorldNoScale(Result.TangentToLocal);
+	Result.TangentToWorldSign = TangentSign * GetInstanceData().DeterminantSign;
 	return Result;
 }
 
-// 6. Converts from vertex factory specific input to a FMaterialVertexParameters, which is used by vertex shader material inputs
-FMaterialVertexParameters GetMaterialVertexParameters(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 WorldPosition, half3x3 TangentToLocal)
-{
-	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
-	
-	Result.WorldPosition = WorldPosition;
-	Result.TangentToWorld = mul(TangentToLocal, GetLocalToWorld3x3());
-	Result.VertexColor = Intermediates.Color;
-	Result.SceneData = Intermediates.SceneData;
-
-	return Result;
-}
-
-// 7. 用于从顶点着色器调用来获得世界空间的顶点位置。这个TransformLocalToTranslatedWorld是在VertexFactoryCommon里定义好的，直接调用
 float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
-	return TransformLocalToTranslatedWorld(Intermediates.Position.xyz);
+	// Note: 用于VS中世界位置， 一些特殊效果可以自定义实现
+	FDFMatrix LocalToWorld = GetInstanceData().LocalToWorld;
+	return TransformLocalToTranslatedWorld(Input.Position.xyz, LocalToWorld);
 }
 
-// 8. 直接返回即可，暂时对光栅化后的位置不做修改
-float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 InWorldPosition)
+float3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
-	return InWorldPosition;
+	// Note: 用于VS中获取切线空间到本地空间的矩阵
+	return Intermediates.TangentToLocal;
 }
 
-// 9. 组装Vertex Shader 到Pixel Shader中需要插值的变量
+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	//  Note: 获取世界坐标法线
+	return Intermediates.TangentToWorld[2];
+}
+
+FMaterialVertexParameters GetMaterialVertexParameters(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 WorldPosition, float3x3 TangentToLocal)
+{
+	// Note: 生成从VS到PS的插值数据
+	// Impl: 根据需要实现
+	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
+	Result.SceneData = GetSceneDataIntermediates();
+	Result.WorldPosition = WorldPosition;
+	Result.VertexColor = half4(1.0f, 1.0f, 1.0f, 1.0f);
+	Result.TangentToWorld = mul(TangentToLocal, GetLocalToWorld3x3(Result));
+	return Result;
+}
+
 FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
 {
-	FVertexFactoryInterpolantsVSToPS Interpolants;
-	Interpolants.Color = Intermediates.Color;
-	Interpolants.TexCoords = float2(0,0);
+	// Note: 获取PS中的材质参数
+	// Impl: 根据需要实现
+	FVertexFactoryInterpolantsVSToPS Interpolants = (FVertexFactoryInterpolantsVSToPS) 0;
+	Interpolants.TangentToWorld0 = float4(Intermediates.TangentToWorld[0], 0.0f);
+	Interpolants.TangentToWorld2 = float4(Intermediates.TangentToWorld[2], Intermediates.TangentToWorldSign);
 	return Interpolants;
 }
 
-// 10. 获取上一帧世界位置，暂时直接返回
+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SVPosition)
+{
+	// Note: 获取PS中的材质参数
+	// Impl: 根据需要实现
+	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
+	half3 TangentToWorld0 = Interpolants.TangentToWorld0.xyz;
+	half4 TangentToWorld2 = Interpolants.TangentToWorld2;
+	Result.TangentToWorld = AssembleTangentToWorld(TangentToWorld0, TangentToWorld2);
+	Result.PrimitiveId = 0;
+	Result.TwoSidedSign = 1;
+
+	return Result;
+}
+
+float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 TranslatedWorldPosition)
+{
+	// Note: 裁剪空间前的世界坐标，可以自定义一些特殊效果
+	// Impl: 未作处理，返回默认的TranslatedWorldPosition
+	return TranslatedWorldPosition;
+}
+
 float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
+	// Note: 获取前一帧的世界坐标, 一些基于Temporal的算法可能会用到
+	// Impl: 这里暂时忽略，直接返回了当前坐标
 	return VertexFactoryGetWorldPosition(Input, Intermediates);
 }
 
-// 11. 直接抄的Engine/Plugins/Experimental/Water/Shaders/Private/WaterMeshVertexFactory.ush
-half3x3 VertexFactoryGetTangentToLocal( FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates )
+FSceneDataIntermediates GetSceneDataIntermediates(FVertexFactoryIntermediates Intermediates)
 {
-	return half3x3(1,0,0,0,1,0,0,0,1);
+	return GetSceneDataIntermediates();
 }
 
-// 12. 直接抄的Engine/Plugins/Experimental/Water/Shaders/Private/WaterMeshVertexFactory.ush
-float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-{
-	// TODO: Central differencing to figure out the normal
-	return float3(0.0f, 0.0f, 1.0f);
-}
-
-FInstanceSceneData GetInstanceData(FVertexFactoryIntermediates Intermediates)
-{
-	return Intermediates.SceneData.InstanceData;
-}
-
-#include "VertexFactoryDefaultInterface.ush"
+#define VF_IMPLEMENTED_GET_SCENE_DATA_INTERMEDIATES
+#include "/Engine/Private/VertexFactoryDefaultInterface.ush"
 ```
 
 ### 2. Step2 添加对应的自定义MeshComponent文件
    
 ```cpp
+// Fill out your copyright notice in the Description page of Project Settings.
+
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Engine/EngineTypes.h"
-#include "Engine/EngineBaseTypes.h"
-#include "Components/SceneComponent.h"
-
-#include "MyCustomMeshComponent.generated.h"
+#include "Components/PrimitiveComponent.h"
+#include "MyMeshComponent.generated.h"
 
 
-
-class FMyCustomVertexFactory: public FVertexFactory
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class CUSTOMMESHCOMP_API UMyMeshComponent : public UPrimitiveComponent
 {
-	DECLARE_VERTEX_FACTORY_TYPE(FMyCustomVertexFactory)
+	GENERATED_BODY()
+
 public:
-	FMyCustomVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, const char* InDebugName)
-		: FVertexFactory(InFeatureLevel)
+	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+};
+
+```
+
+```cpp
+#include "MyMeshComponent.h"
+#include "MaterialDomain.h"
+#include "VertexFactory.h"
+
+class FMyMeshVertexFactory : public FVertexFactory
+{
+	DECLARE_VERTEX_FACTORY_TYPE(FMyMeshVertexFactory)
+
+public:
+	FMyMeshVertexFactory(ERHIFeatureLevel::Type InFeatureLevel): FVertexFactory(InFeatureLevel)
 	{
 	}
-	
 
-	//~ Begin  FRenderResource interface
+	// InitRHI: 在渲染线程初始化对象时调用或或手动调用InitResource
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
-		// 顶点流， 类似于VertexShaderInputLayout的说明
-		FVertexStream PositionVertexStream;
-		PositionVertexStream.VertexBuffer = VertexBuffer;
-		PositionVertexStream.Stride = sizeof(FVector);
-		PositionVertexStream.Offset = 0;
-		PositionVertexStream.VertexStreamUsage = EVertexStreamUsage::Default;
-
-		const FVertexElement VertexPositionElement(Streams.Add(PositionVertexStream), 0, VET_Float3, 0, PositionVertexStream.Stride, false);
-
-		// 顶点声明
 		FVertexDeclarationElementList Elements;
-		Elements.Add(VertexPositionElement);
+		// 顶点输入的声明
+		FVertexStreamComponent PositionStreamComponent;
+		PositionStreamComponent.VertexBuffer = PositionBuffer;
+		PositionStreamComponent.Stride = sizeof(FVector3f);
+		PositionStreamComponent.Type = VET_Float3;
+		PositionStreamComponent.Offset = 0;
+		PositionStreamComponent.VertexStreamUsage = EVertexStreamUsage::Default;
+		Elements.Add(AccessStreamComponent(PositionStreamComponent, 0));
 
-		InitDeclaration(Elements);
+		FVertexStreamComponent TangentXStreamComponent;
+		TangentXStreamComponent.VertexBuffer = TangentBuffer;
+		TangentXStreamComponent.Stride = sizeof(FPackedNormal) * 2;
+		TangentXStreamComponent.Type = VET_PackedNormal;
+		TangentXStreamComponent.Offset = 0;
+		TangentXStreamComponent.VertexStreamUsage = EVertexStreamUsage::Default;
+		Elements.Add(AccessStreamComponent(TangentXStreamComponent, 1));
+
+		FVertexStreamComponent TangentZStreamComponent;
+		TangentZStreamComponent.VertexBuffer = TangentBuffer;
+		TangentZStreamComponent.Stride = sizeof(FPackedNormal) * 2;
+		TangentZStreamComponent.Type = VET_PackedNormal;
+		TangentZStreamComponent.Offset =  sizeof(FPackedNormal);
+		TangentZStreamComponent.VertexStreamUsage = EVertexStreamUsage::Default;
+		Elements.Add(AccessStreamComponent(TangentZStreamComponent, 2));
+
+		InitDeclaration(Elements, EVertexInputStreamType::Default);
+		check(GetDeclaration());
 	}
-	
+
 	virtual void ReleaseRHI() override
 	{
 		UniformBuffer.SafeRelease();
 		FVertexFactory::ReleaseRHI();
 	}
-	//~ End  FRenderResource interface
 
-	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+	// 决定对应Shader是否编译
+	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters)
+	{
+		return true;
+	}
 
-	FVertexBuffer *VertexBuffer = nullptr;
-	
-private:
+	// 修改Shader编译参数
+	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters,
+	                                         FShaderCompilerEnvironment& OutEnvironment)
+	{
+	}
+
+	// 验证Shader编译结果是否符合预期
+	static void ValidateCompiledResult(const FVertexFactoryType* Type, EShaderPlatform Platform,
+	                                   const FShaderParameterMap& ParameterMap, TArray<FString>& OutErrors)
+	{
+	}
+
+protected:
+	FVertexBuffer* PositionBuffer = nullptr;
+	FVertexBuffer* TangentBuffer = nullptr;
 	FUniformBufferRHIRef UniformBuffer;
-	
+	friend class FMyMeshSceneProxy;
+};
+
+IMPLEMENT_VERTEX_FACTORY_TYPE(FMyMeshVertexFactory, "/Plugins/CustomMeshComp/Shaders/Private/MyMeshVertexFactory.ush",
+	EVertexFactoryFlags::UsedWithMaterials | EVertexFactoryFlags::SupportsManualVertexFetch  // 可用用于材质
+);
+
+constexpr uint32 NumVertices = 36;
+// Position index buffer
+class FMyCubePositionVertexBuffer: public FVertexBuffer {
+public:
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override {
+		FVector3f Data[]{
+			{-50.0f, -50.0f, -50.0f}, { 50.0f, -50.0f, -50.0f}, { 50.0f,  50.0f, -50.0f}, { 50.0f,  50.0f, -50.0f}, {-50.0f,  50.0f, -50.0f}, {-50.0f, -50.0f, -50.0f},
+			{-50.0f, -50.0f,  50.0f}, { 50.0f,  50.0f,  50.0f}, { 50.0f, -50.0f,  50.0f}, { 50.0f,  50.0f,  50.0f}, {-50.0f, -50.0f,  50.0f}, {-50.0f,  50.0f,  50.0f},
+			{-50.0f,  50.0f,  50.0f}, {-50.0f, -50.0f, -50.0f}, {-50.0f,  50.0f, -50.0f}, {-50.0f, -50.0f, -50.0f}, {-50.0f,  50.0f,  50.0f}, {-50.0f, -50.0f,  50.0f},
+			{ 50.0f,  50.0f,  50.0f}, { 50.0f,  50.0f, -50.0f}, { 50.0f, -50.0f, -50.0f}, { 50.0f, -50.0f, -50.0f}, { 50.0f, -50.0f,  50.0f}, { 50.0f,  50.0f,  50.0f},
+			{-50.0f, -50.0f, -50.0f}, { 50.0f, -50.0f,  50.0f}, { 50.0f, -50.0f, -50.0f}, { 50.0f, -50.0f,  50.0f}, {-50.0f, -50.0f, -50.0f}, {-50.0f, -50.0f,  50.0f},
+			{-50.0f,  50.0f, -50.0f}, { 50.0f,  50.0f, -50.0f}, { 50.0f,  50.0f,  50.0f}, { 50.0f,  50.0f,  50.0f}, {-50.0f,  50.0f,  50.0f}, {-50.0f,  50.0f, -50.0f},
+		};
+		constexpr uint32 BufferSize = NumVertices * sizeof(FVector3f);
+		FRHIResourceCreateInfo CreateInfo{ TEXT("MyCubePositionVertexBuffer") };
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(BufferSize, BUF_Static, CreateInfo);
+		void* LockedData = RHICmdList.LockBuffer(VertexBufferRHI, 0, BufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(LockedData, Data, BufferSize);
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
+	}
+};
+
+// vertex index Buffer
+class FMyCubeTangentVertexBuffer: public FVertexBuffer {
+public:
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override {
+		struct FTangentData {
+			FPackedNormal TangentX, TangentZ;
+		};
+		FTangentData Data[NumVertices];
+		for (int32 i = 0; i < 6; ++i) { Data[i] = { FVector3f{-1.0f,  0.0f,  0.0f}, FVector3f{ 0.0f,  0.0f, -1.0f} }; }
+		for (int32 i = 0; i < 6; ++i) { Data[i + 6] = { FVector3f{ 1.0f,  0.0f,  0.0f}, FVector3f{ 0.0f,  0.0f,  1.0f} }; }
+		for (int32 i = 0; i < 6; ++i) { Data[i + 12] = { FVector3f{ 0.0f,  0.0f,  1.0f}, FVector3f{-1.0f,  0.0f,  0.0f} }; }
+		for (int32 i = 0; i < 6; ++i) { Data[i + 18] = { FVector3f{ 0.0f,  0.0f, -1.0f}, FVector3f{ 1.0f,  0.0f,  0.0f} }; }
+		for (int32 i = 0; i < 6; ++i) { Data[i + 24] = { FVector3f{ 1.0f,  0.0f,  0.0f}, FVector3f{ 0.0f, -1.0f,  0.0f} }; }
+		for (int32 i = 0; i < 6; ++i) { Data[i + 30] = { FVector3f{ 1.0f,  0.0f,  0.0f}, FVector3f{ 0.0f,  1.0f,  0.0f} }; }
+		constexpr uint32 BufferSize = NumVertices * sizeof(FTangentData);
+		FRHIResourceCreateInfo CreateInfo{ TEXT("MyCubeTangentVertexBuffer") };
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(BufferSize, BUF_Static, CreateInfo);
+		void* LockedData = RHICmdList.LockBuffer(VertexBufferRHI, 0, BufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(LockedData, Data, BufferSize);
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
+	}
+};
+
+// Index buffer
+class FMyCubeIndexBuffer: public FIndexBuffer {
+public:
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override {
+		uint16 Data[NumVertices];
+		for(int32 i=0; i<NumVertices; ++i) {
+			Data[i] = (uint16)i;
+		}
+		constexpr uint32 BufferSize = NumVertices * sizeof(uint16);
+		FRHIResourceCreateInfo CreateInfo{ TEXT("MyCubeIndexBuffer") };
+		IndexBufferRHI = RHICmdList.CreateIndexBuffer(sizeof(uint16), BufferSize, BUF_Static, CreateInfo);
+		void* LockedData = RHICmdList.LockBuffer(IndexBufferRHI, 0, BufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(LockedData, Data, BufferSize);
+		RHICmdList.UnlockBuffer(IndexBufferRHI);
+	}
 };
 
 
-UCLASS(Blueprintable, ClassGroup=(Rendering, Common), hidecategories=(Object, "Mesh|CustomAssetMesh"), config=Engine, editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
-class UMyCustomMeshComponent : public UMeshComponent
-{
-	GENERATED_BODY()
-	public:
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Components|CustomAssetMesh")
-	bool bIsVisible;
-
-	UFUNCTION(BlueprintCallable, Category = "Components|CustomAssetMesh")
-	void SetIsVisible(const bool bNewIsVisible) { bIsVisible = bNewIsVisible; }
-
-	UPROPERTY(EditAnywhere, Category="Components|CustomAssetMesh")
-	TObjectPtr<UStaticMesh> StaticMesh;
-
-	UPROPERTY()
-	TObjectPtr<UMaterialInterface> Material;
-
-	//~ Begin UPrimitiveComponent Interface
-	ENGINE_API virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
-	ENGINE_API virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
-	ENGINE_API virtual int32 GetNumMaterials() const override;
-	ENGINE_API virtual void GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials = false) const override;
-	//~ End UPrimitiveComponent Interface
-
-};
-```
-
-```cpp
-#include "Components/MyCustomMeshComponent.h"
-
-#include "DataDrivenShaderPlatformInfo.h"
-#include "LandscapeGizmoActiveActor.h"
-#include "MaterialDomain.h"
-#include "MeshMaterialShader.h"
-#include "Materials/MaterialRenderProxy.h"
-#include "Serialization/JsonTypes.h"
-
-bool FMyCustomVertexFactory::ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters)
-{
-	return RHISupportsManualVertexFetch(Parameters.Platform);
-}
-IMPLEMENT_VERTEX_FACTORY_TYPE(FMyCustomVertexFactory, "/Engine/Private/MyCustomVertexFactory.ush", EVertexFactoryFlags::UsedWithMaterials)
-
-class FMyCustomSceneProxy final : public FPrimitiveSceneProxy
+class FMyMeshSceneProxy : public FPrimitiveSceneProxy
 {
 public:
-	SIZE_T GetTypeHash() const override
+	FMyMeshSceneProxy(UMyMeshComponent* InComponent)
+		:FPrimitiveSceneProxy(InComponent),
+		VertexFactory(InComponent->GetWorld()->GetFeatureLevel())
+	{
+		
+	}
+	virtual ~FMyMeshSceneProxy() override
+	{
+		VertexFactory.ReleaseResource();
+		if (PositionVertexBuffer)
+		{
+			PositionVertexBuffer->ReleaseResource();
+		}
+		if (TangentVertexBuffer)
+		{
+			TangentVertexBuffer->ReleaseResource();
+		}
+		if (IndexBuffer)
+		{
+			IndexBuffer->ReleaseResource();
+		}
+	}
+
+	virtual SIZE_T GetTypeHash() const override
 	{
 		static size_t UniquePointer;
 		return reinterpret_cast<size_t>(&UniquePointer);
 	}
-	
-	FMyCustomSceneProxy(UMyCustomMeshComponent* InComponent)
-		: FPrimitiveSceneProxy(InComponent), bIsVisible(InComponent->bIsVisible), Material(	InComponent->Material),
-	MaterialRelevance(InComponent->GetMaterialRelevance(GetScene().GetFeatureLevel())), StaticMesh(InComponent->StaticMesh),
-	VertexFactory(GetScene().GetFeatureLevel(), "FCustomVertexFactory"),
-	Component(InComponent)
+
+	virtual uint32 GetMemoryFootprint() const override
 	{
-		if (StaticMesh)
-		{
-			UpdateStaticMesh(StaticMesh);
-		}
+		return sizeof(*this) + GetAllocatedSize();
 	}
 
-	virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const override
+	void CreateRenderThreadResources(FRHICommandListBase& RHICmdList) override
 	{
-		if (!bIsVisible || !StaticMesh)
-		{
-			return;
-		}
-
-		// 生成MaterialProxy和线框
-		const bool bIsWireframe = AllowDebugViewmodes() && ViewFamily.EngineShowFlags.Wireframe;
-		FMaterialRenderProxy* WireframeMaterial = nullptr;
-		if (bIsWireframe)
-		{
-			WireframeMaterial = new FColoredMaterialRenderProxy(
-				GEngine->WireframeMaterial->GetRenderProxy(),
-				FLinearColor(0.2f, 0.5f, 1.0f));
-
-			Collector.RegisterOneFrameMaterialProxy(WireframeMaterial);
-		}
-		
-		if (StaticMesh)
-		{
-			const FStaticMeshRenderData* RenderData = StaticMesh->GetRenderData();
-			// 假设只有LOD0
-			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
-			{
-				const FSceneView* View = Views[ViewIndex];
-				if (IsShown(View) && VisibilityMap & (1 << ViewIndex))
-				{
-					for (int32 LODIndex = 0; LODIndex < RenderData->LODResources.Num(); LODIndex++)
-					{
-						const FStaticMeshLODResources& LODModel = RenderData->LODResources[LODIndex];
-						for (int32 SectionIndex = 0; SectionIndex < LODModel.Sections.Num(); SectionIndex++)
-						{
-							UMaterialInterface* SectionMaterial = Component->GetMaterial(LODModel.Sections[SectionIndex].MaterialIndex) == nullptr ? UMaterial::GetDefaultMaterial(MD_Surface): Component->GetMaterial(SectionIndex);
-							FMaterialRenderProxy* MaterialRenderProxy = bIsWireframe ? WireframeMaterial : SectionMaterial->GetRenderProxy();
-
-							FMeshBatch& MeshBatch = Collector.AllocateMesh();
-							FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
-							BatchElement.IndexBuffer = &LODModel.IndexBuffer;
-							MeshBatch.bWireframe = bIsWireframe;
-							MeshBatch.VertexFactory = &VertexFactory;
-							MeshBatch.MaterialRenderProxy = MaterialRenderProxy;
-
-							bool bHasPrecomputedVolumetricLightMap;
-							FMatrix PreviousLocalToWorldMatrix;
-							int32 SingleCaptureIndex;
-							bool bOutputVelocity;
-							GetScene().GetPrimitiveUniformShaderParameters_RenderThread(GetPrimitiveSceneInfo(), bHasPrecomputedVolumetricLightMap, PreviousLocalToWorldMatrix, SingleCaptureIndex, bOutputVelocity);
-							FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-							DynamicPrimitiveUniformBuffer.Set(Collector.GetRHICommandList(), GetLocalToWorld(), PreviousLocalToWorldMatrix, GetBounds(), GetLocalBounds(), true, bHasPrecomputedVolumetricLightMap, bOutputVelocity);
-							BatchElement.PrimitiveUniformBufferResource = &DynamicPrimitiveUniformBuffer.UniformBuffer;
-
-							BatchElement.FirstIndex = 0;
-							BatchElement.NumPrimitives = LODModel.IndexBuffer.GetNumIndices() / 3;
-							BatchElement.MinVertexIndex = 0;
-							BatchElement.MaxVertexIndex = LODModel.VertexBuffers.PositionVertexBuffer.GetNumVertices() - 1;
-							MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
-							MeshBatch.Type = PT_TriangleList;
-							MeshBatch.DepthPriorityGroup = SDPG_World;
-							MeshBatch.bCanApplyViewModeOverrides = false;
-							Collector.AddMesh(ViewIndex, MeshBatch);
-						}
-					}
-				}
-			}
-		}
+		PositionVertexBuffer = MakeUnique<FMyCubePositionVertexBuffer>();
+		PositionVertexBuffer->InitResource(RHICmdList);
+		TangentVertexBuffer = MakeUnique<FMyCubeTangentVertexBuffer>();
+		TangentVertexBuffer->InitResource(RHICmdList);
+		IndexBuffer = MakeUnique<FMyCubeIndexBuffer>();
+		IndexBuffer->InitResource(RHICmdList);;
+		// 初始化VertexFactory
+		VertexFactory.PositionBuffer = PositionVertexBuffer.Get();
+		VertexFactory.TangentBuffer = TangentVertexBuffer.Get();
+		VertexFactory.InitResource(RHICmdList);	
 	}
 
 	virtual FPrimitiveViewRelevance GetViewRelevance(const FSceneView* View) const override
 	{
 		FPrimitiveViewRelevance Result;
-		Result.bDrawRelevance = IsShown(View) && bIsVisible;
-		Result.bShadowRelevance = false;
-		Result.bDynamicRelevance = true;
-		Result.bRenderInMainPass = true;
-		Result.bUsesLightingChannels = false;
-		Result.bRenderCustomDepth = false;
-		
-		MaterialRelevance.SetPrimitiveViewRelevance(Result);
-		
+		Result.bDrawRelevance = IsShown(View);
+		Result.bDynamicRelevance = true; // GetDynamicMeshElements
+		Result.bStaticRelevance = false;
 		return Result;
 	}
 
-	virtual void CreateRenderThreadResources(FRHICommandListBase& RHICmdList) override
+	virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const override
 	{
-		VertexFactory.InitResource(RHICmdList);
-	}
+		FMaterialRenderProxy* MaterialRenderProxy = UMaterial::GetDefaultMaterial(EMaterialDomain::MD_Surface)->GetRenderProxy();
+		// 逐view 搜集
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex) {
+			if (VisibilityMap & (1 << ViewIndex)) {
+				// Create a mesh batch
+				FMeshBatch& MeshBatch = Collector.AllocateMesh();
+				MeshBatch.bUseAsOccluder = false;
+				MeshBatch.VertexFactory = &VertexFactory;
+				MeshBatch.MaterialRenderProxy = MaterialRenderProxy;
+				MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+				MeshBatch.DepthPriorityGroup = SDPG_World;
+				MeshBatch.Type = EPrimitiveType::PT_TriangleList;
 
-	void UpdateStaticMesh(UStaticMesh* InMesh)
-	{
-		if(InMesh)
-		{
-			StaticMesh = InMesh;
-			VertexFactory.VertexBuffer = &StaticMesh->GetRenderData()->LODResources[0].VertexBuffers.PositionVertexBuffer;
+				// Setup index buffer
+				FMeshBatchElement& Element = MeshBatch.Elements[0];
+				Element.FirstIndex = 0;
+				Element.NumPrimitives = NumVertices / 3;
+				Element.IndexBuffer = IndexBuffer.Get();
+				Element.MinVertexIndex = 0;
+				Element.MaxVertexIndex = NumVertices - 1;
+
+				// Primitive uniform buffer is required.
+				Element.PrimitiveUniformBuffer = GetUniformBuffer();
+				MeshBatch.bCanApplyViewModeOverrides = false;
+				Collector.AddMesh(ViewIndex, MeshBatch);
+			}
 		}
 	}
 	
-	virtual uint32 GetMemoryFootprint(void) const override { return(sizeof(*this) + GetAllocatedSize()); }
-    	
-	uint32 GetAllocatedSize(void) const { return( FPrimitiveSceneProxy::GetAllocatedSize() ); }
-
 private:
-	bool bIsVisible;
-
-	UMaterialInterface* Material;
-	UStaticMesh* StaticMesh;
-	FMaterialRelevance MaterialRelevance;
-	FMyCustomVertexFactory VertexFactory;
-	UMyCustomMeshComponent* Component;
+	FMyMeshVertexFactory VertexFactory;
+	TUniquePtr<FVertexBuffer> PositionVertexBuffer;
+	TUniquePtr<FVertexBuffer> TangentVertexBuffer;
+	TUniquePtr<FIndexBuffer> IndexBuffer;
 };
 
 
-FPrimitiveSceneProxy* UMyCustomMeshComponent::CreateSceneProxy()
+FPrimitiveSceneProxy* UMyMeshComponent::CreateSceneProxy()
 {
-	return new FMyCustomSceneProxy(this);
+	return new FMyMeshSceneProxy(this);
 }
 
-FBoxSphereBounds UMyCustomMeshComponent::CalcBounds(const FTransform& LocalToWorld) const
+FBoxSphereBounds UMyMeshComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	if (StaticMesh != nullptr)
-	{
-		// Graphics bounds.
-		FBoxSphereBounds NewBounds = StaticMesh->GetBounds().TransformBy(LocalToWorld);
-		NewBounds.BoxExtent *= BoundsScale;
-		NewBounds.SphereRadius *= BoundsScale;
-
-		return NewBounds;
-	}
-	else
-	{
-		return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector::ZeroVector, 0.f);
-	}
+	FBoxSphereBounds MyBounds{ {0.0,0.0,0.0}, {50.0, 50.0, 50.0}, 50.0 };
+	return MyBounds.TransformBy(LocalToWorld);
 }
 
-int32 UMyCustomMeshComponent::GetNumMaterials() const
-{
-	return 1;
-}
-
-void UMyCustomMeshComponent::GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials) const
-{
-	if (Material!=nullptr)
-	{
-		OutMaterials.Add(Material);
-	}
-}
 ```
+
+
+### 3. Result
+![alt text](image-result.png)

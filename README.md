@@ -19,6 +19,13 @@
   -  [待继续补充] [毛发插件分析 4-GFurPro](Practice/4-GFurPro.md)
 - 渲染
   - [待继续补充] [1-渲染基本概念和类](Rendering/1-RenderVars.md)
+  - [2-Groom毛发系统](Rendering/2-Groom.md)
+- 世界构建
+  - [1-WorldPartition](WorldBuild/1-WorldPartition.md)
+
+- 物理模拟
+  - [1-Groom毛发的物理模拟](Physics/1-Hair.md)
+  - [2-Chaos布料的物理模拟](Physics/2-Cloth.md)
 
 - GamePlay
   - [待继续补充] [GAS系统]

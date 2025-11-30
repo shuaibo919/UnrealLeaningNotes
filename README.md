@@ -17,6 +17,8 @@
   -  [未完成] [添加虚幻插件 2-AddPlugin](Practice/2-AddPlugin.md)
   -  [待继续补充] [添加自定义MeshComp和顶点工厂](Practice/3-AddCustomVertexFactory.md)
   -  [待继续补充] [毛发插件分析 4-GFurPro](Practice/4-GFurPro.md)
+  -  [添加自定义材质节点 5-AddMaterialNode](Practice/5-AddCustomMaterialNode.md)
+  -  [待继续补充] [添加自定义Pass 6-AddCustomMaterialPass](Practice/6-AddCustomPass.md)
 - 渲染
   - [待继续补充] [1-渲染基本概念和类](Rendering/1-RenderVars.md)
   - [2-Groom毛发系统](Rendering/2-Groom.md)
